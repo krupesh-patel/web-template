@@ -1,90 +1,71 @@
 version: 0.2
+
 env:
   variables:
     PYTHONUNBUFFERED: "1"
     TARGET_IMAGE_PLATFORM: "linux/arm64"
+    BUILDER_NAME: "ecr-builder"
+
 phases:
   install:
     runtime-versions:
       python: 3.11
     commands:
-      # - pip3.11 install -r requirements.txt || true
+      - echo "Installing Python dependencies..."
       - pip3.11 install requests requests-toolbelt pyyaml boto3 nginxparser_eb
+
   pre_build:
     commands:
-      - echo "Starting Docker daemon (DinD) with safe defaults..."
-      - export DOCKER_HOST=unix:///var/run/docker.sock
-      - sysctl -w net.ipv4.ip_forward=1 || true
-      - DOCKERD_ARGS="--host=$DOCKER_HOST --userland-proxy=false --init=false --storage-driver=vfs --data-root=/tmp/docker --exec-root=/tmp/docker-exec"
-      - nohup dockerd $DOCKERD_ARGS >/tmp/dockerd.log 2>&1 &
-      # NOTE: These add extra delay as 'overlay2' storage driver we do not have currently
-      # - DOCKERD_ARGS="--host=$DOCKER_HOST --userland-proxy=false --init=false --storage-driver=overlay2 --data-root=/tmp/docker --exec-root=/tmp/docker-exec"
-      # - nohup dockerd $DOCKERD_ARGS >/tmp/dockerd.log 2>&1 &
-      # - |
-      #   if ! timeout 40 sh -c "until docker info >/dev/null 2>&1; do sleep 1; done"; then
-      #     echo "overlay2 failed; first 200 lines of dockerd log:"
-      #     if [ -f /tmp/dockerd.log ]; then sed -n '1,200p' /tmp/dockerd.log || cat /tmp/dockerd.log || true; else echo "dockerd.log not found"; fi
-      #     command -v pkill >/dev/null 2>&1 && pkill dockerd || true
-      #     sleep 2
-      #     DOCKERD_ARGS="--host=$DOCKER_HOST --userland-proxy=false --init=false --storage-driver=vfs --data-root=/tmp/docker --exec-root=/tmp/docker-exec"
-      #     nohup dockerd $DOCKERD_ARGS >/tmp/dockerd.log 2>&1 &
-      #     if ! timeout 120 sh -c "until docker info >/dev/null 2>&1; do sleep 1; done"; then
-      #       echo "dockerd failed; last 200 lines of log:"
-      #       if [ -f /tmp/dockerd.log ]; then tail -n 200 /tmp/dockerd.log || true; else echo "dockerd.log not found"; fi
-      #       exit 1
-      #     fi
-      #   fi
-      
-      # # enable kernel emulation for x86_64 inside DinD
-      # - docker run --privileged --rm tonistiigi/binfmt --install amd64
-      # # sanity check: should print x86_64
-      # - docker run --rm --platform linux/amd64 alpine uname -m
-      
-      # On ARM environment we build natively for arm64; no binfmt needed
-      - echo "Host arch:" && docker info --format {{.Architecture}}
-      
-      - mkdir -p ~/.docker/cli-plugins
-      - |
-        COMPOSE_VER="v2.24.5"
-        ARCH=$(uname -m)
-        curl -sSL "https://github.com/docker/compose/releases/download/${COMPOSE_VER}/docker-compose-linux-${ARCH}" -o ~/.docker/cli-plugins/docker-compose
-        chmod +x ~/.docker/cli-plugins/docker-compose
-      - docker compose version || true
+      - echo "Setting up Docker environment..."
 
-      - echo "Testing egress - docker run busybox wget"
-      - docker run --rm --network bridge busybox sh -c "wget -qO- https://pypi.org/simple/amqp/ >/dev/null && echo NET:OK || echo NET:FAIL"
-      - echo "Docker:" && docker version
-      - echo "Buildx:" && (docker buildx version || true)
+      # Use default docker (no need for heavy DinD unless required)
+      - export DOCKER_BUILDKIT=1
+
+      # Login to DockerHub (optional)
       - |
         if [ -n "$DOCKERHUB_USERNAME" ] && [ -n "$DOCKERHUB_TOKEN" ]; then
-          echo "Logging in to Docker Hub..."
           echo "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin
         else
-          echo "WARNING: DOCKERHUB_USERNAME or DOCKERHUB_TOKEN not set - may hit rate limits"
-          echo "Logging in to ECR Public Gallery as fallback..."
-          aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws || true
+          echo "Skipping DockerHub login (may hit rate limits)"
         fi
-      
+
+      # Login to ECR
       - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-      - if [ -n "$ECR_REPOSITORY_URI" ]; then
-          aws ecr get-login-password --region $AWS_DEFAULT_REGION |
-          docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com;
+      - |
+        if [ -n "$ECR_REPOSITORY_URI" ]; then
+          echo "Logging into ECR..."
+          aws ecr get-login-password --region $AWS_DEFAULT_REGION | \
+          docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
         fi
+
+      # Setup buildx builder
+      - echo "Setting up buildx..."
+      - docker buildx create --name $BUILDER_NAME --use || docker buildx use $BUILDER_NAME
+      - docker buildx inspect --bootstrap
+
+      - docker version
+      - docker buildx version
+
   build:
     commands:
-      - python3.11 src/remote_builder.py \
-        --token "$MICROSERVICE_AUTH_TOKEN" \
-        --build_id "$BUILD_ID" \
-        --deploy_util_params_api "$DEPLOY_UTIL_PARAMS_API" \
-        --procfile_service_name "$PROCFILE_SERVICE_NAME" \
-        --event_type "$EVENT_TYPE" \
-        --activity_id "$ACTIVITY_ID" \
-        --aws_region_name "$AWS_DEFAULT_REGION" \
-        --commit_id "$COMMIT_ID" \
-        --env_id "$ENV_ID" \
-        --master_ip "$MASTER_IP" \
-        --ftp_user "$FTP_USER" \
-        --ftp_pass "$FTP_PASS" \
-        --ecr_repository "$ECR_REPOSITORY_URI"
+      - echo "Starting Docker build with ECR cache..."
+
+      # Optional: define tags
+      - IMAGE_TAG=${COMMIT_ID:-latest}
+      - CACHE_TAG=buildcache
+
+      # Build and push with cache
+      - |
+        docker buildx build \
+          --platform $TARGET_IMAGE_PLATFORM \
+          --cache-from=type=registry,ref=${ECR_REPOSITORY_URI}:${CACHE_TAG} \
+          --cache-to=type=registry,ref=${ECR_REPOSITORY_URI}:${CACHE_TAG},mode=max \
+          -t ${ECR_REPOSITORY_URI}:${IMAGE_TAG} \
+          -t ${ECR_REPOSITORY_URI}:latest \
+          --push \
+          .
+
+      - echo "Build completed successfully"
+
 artifacts:
   files: []
