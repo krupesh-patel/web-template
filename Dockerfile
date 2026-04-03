@@ -13,8 +13,7 @@ RUN yarn install --frozen-lockfile
 COPY . .
 
 # Build app
-RUN NODE_OPTIONS="--max-old-space-size=4096" yarn build
-
+RUN yarn build
 
 # ----------- RUNTIME STAGE -----------
 FROM node:22-alpine AS runtime
