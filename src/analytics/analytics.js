@@ -5,6 +5,7 @@ import { locationChanged } from '../ducks/routing.duck';
 // handler should have the following methods:
 //
 // - trackPageView(canonicalPath, previousPath): called when the URL is changed
+
 export const createAnalyticsListenerMiddleware = handlers => {
   const listenerMiddleware = createListenerMiddleware();
 
