@@ -1,4 +1,4 @@
-```# ----------- BUILD STAGE -----------
+# ----------- BUILD STAGE -----------
 FROM node:22-bookworm-slim AS builder
 
 WORKDIR /app
