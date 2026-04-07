@@ -51,7 +51,7 @@ phases:
       - echo "Starting Docker build with ECR cache..."
 
       # Optional: define tags
-      - IMAGE_TAG=${COMMIT_ID:-latest}
+      - IMAGE_TAG=${CODEBUILD_RESOLVED_SOURCE_VERSION:-latest}
       - CACHE_TAG=buildcache
 
       # Build and push with cache
