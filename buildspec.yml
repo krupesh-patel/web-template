@@ -1,0 +1,71 @@
+version: 0.2
+
+env:
+  variables:
+    PYTHONUNBUFFERED: "1"
+    TARGET_IMAGE_PLATFORM: "linux/arm64"
+    BUILDER_NAME: "ecr-builder"
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.11
+    commands:
+      - echo "Installing Python dependencies..."
+      - pip3.11 install requests requests-toolbelt pyyaml boto3 nginxparser_eb
+
+  pre_build:
+    commands:
+      - echo "Setting up Docker environment..."
+
+      # Use default docker (no need for heavy DinD unless required)
+      - export DOCKER_BUILDKIT=1
+
+      # Login to DockerHub (optional)
+      - |
+        if [ -n "$DOCKERHUB_USERNAME" ] && [ -n "$DOCKERHUB_TOKEN" ]; then
+          echo "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin
+        else
+          echo "Skipping DockerHub login (may hit rate limits)"
+        fi
+
+      # Login to ECR
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - |
+        if [ -n "$ECR_REPOSITORY_URI" ]; then
+          echo "Logging into ECR..."
+          aws ecr get-login-password --region $AWS_DEFAULT_REGION | \
+          docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
+        fi
+
+      # Setup buildx builder
+      - echo "Setting up buildx..."
+      - docker buildx create --name $BUILDER_NAME --use || docker buildx use $BUILDER_NAME
+      - docker buildx inspect --bootstrap
+
+      - docker version
+      - docker buildx version
+
+  build:
+    commands:
+      - echo "Starting Docker build with ECR cache..."
+
+      # Optional: define tags
+      - IMAGE_TAG=${CODEBUILD_RESOLVED_SOURCE_VERSION:-latest}
+      - CACHE_TAG=buildcache
+
+      # Build and push with cache
+      - |
+        docker buildx build \
+          --platform $TARGET_IMAGE_PLATFORM \
+          --cache-from=type=registry,ref=${ECR_REPOSITORY_URI}:${CACHE_TAG} \
+          --cache-to=type=registry,ref=${ECR_REPOSITORY_URI}:${CACHE_TAG},mode=max \
+          -t ${ECR_REPOSITORY_URI}:${IMAGE_TAG} \
+          -t ${ECR_REPOSITORY_URI}:latest \
+          --push \
+          .
+
+      - echo "Build completed successfully"
+
+artifacts:
+  files: []

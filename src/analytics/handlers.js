@@ -5,6 +5,7 @@ export class LoggingAnalyticsHandler {
 }
 
 // Google Analytics 4 (GA4) using gtag.js script, which is included in util/includeScripts.js
+
 export class GoogleAnalyticsHandler {
   trackPageView(canonicalPath, previousPath) {
     // GA4 property. Manually send page_view events
